@@ -18,13 +18,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let base_url = env::var("OPENROUTER_BASE_URL")
-        .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+        .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta/openai".to_string());
 
     let api_key = env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| {
         eprintln!("OPENROUTER_API_KEY is not set");
         process::exit(1);
     });
-    println!("{base_url} and {api_key}");
+
+    let model = env::var("MODEL").unwrap_or_else(|_| {
+        eprintln!("MODEL is not set");
+        process::exit(1);
+    });
 
     let config = OpenAIConfig::new()
         .with_api_base(base_url)
@@ -36,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let response: Value = client
         .chat()
         .create_byot(json!({
-            "model": "arcee-ai/trinity-large-preview:free",
+            "model": model,
             "messages": [
                 {
                     "role": "user",
