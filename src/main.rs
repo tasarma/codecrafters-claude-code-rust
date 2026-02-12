@@ -1,7 +1,8 @@
 use async_openai::{Client, config::OpenAIConfig};
 use clap::Parser;
 use dotenvy::dotenv;
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::json;
 use std::{env, process};
 
 #[derive(Parser)]
@@ -11,10 +12,46 @@ struct Args {
     prompt: String,
 }
 
+#[derive(Deserialize, Debug)]
+struct ChatResponse {
+    choices: Vec<Choice>,
+}
+
+#[derive(Deserialize, Debug)]
+struct Choice {
+    message: Message,
+}
+
+#[derive(Deserialize, Debug)]
+struct Message {
+    role: String,
+    content: Option<String>,
+    tool_calls: Option<Vec<ToolCall>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    tool_type: String,
+    function: Function,
+}
+
+#[derive(Deserialize, Debug)]
+struct Function {
+    name: String,
+    #[serde(rename = "arguments")]
+    args: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct ReadArgs {
+    file_path: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
-
     let args = Args::parse();
 
     let base_url = env::var("OPENROUTER_BASE_URL")
@@ -36,8 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::with_config(config);
 
-    #[allow(unused_variables)]
-    let response: Value = client
+    let response_value = client
         .chat()
         .create_byot(json!({
             "model": model,
@@ -72,11 +108,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     // eprintln!("Logs from your program will appear here!");
 
-    // TODO: Uncomment the lines below to pass the first stage
-    if let Some(content) = response["choices"][0]["message"]["content"].as_str() {
-        println!("{}", content);
+    let response: ChatResponse = serde_json::from_value(response_value)?;
+    if let Some(tc) = &response
+        .choices
+        .get(0)
+        .and_then(|c| c.message.tool_calls.as_ref())
+    {
+        let first_tool = tc.get(0).unwrap();
+        let function_name = &first_tool.function.name;
+
+        if function_name == "Read" {
+            let args: ReadArgs = serde_json::from_str(&first_tool.function.args)?;
+
+            let content = tokio::fs::read_to_string(&args.file_path).await.unwrap();
+            print!("{}", content);
+        }
     } else {
-        eprintln!("Unexpected response format: {:?}", response);
+        eprintln!("Unexpected response format: {:#?}", response);
     }
 
     Ok(())
