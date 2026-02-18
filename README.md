@@ -33,3 +33,6 @@ Note: This section is for stages 2 and beyond.
    the first time you run it. Subsequent runs will be fast.
 3. Run `codecrafters submit` to submit your solution to CodeCrafters. Test
    output will be streamed to your terminal.
+# Chemical Management System
+This project tracks chemical stability.
+Chemical expiry period: 6 months

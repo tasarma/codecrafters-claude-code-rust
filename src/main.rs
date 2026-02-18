@@ -2,7 +2,7 @@ use async_openai::{Client, config::OpenAIConfig};
 use clap::Parser;
 use dotenvy::dotenv;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{env, process};
 
 #[derive(Parser)]
@@ -10,38 +10,6 @@ use std::{env, process};
 struct Args {
     #[arg(short = 'p', long)]
     prompt: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Deserialize, Debug)]
-struct Choice {
-    message: Message,
-}
-
-#[derive(Deserialize, Debug)]
-struct Message {
-    role: String,
-    content: Option<String>,
-    tool_calls: Option<Vec<ToolCall>>,
-}
-
-#[derive(Deserialize, Debug)]
-struct ToolCall {
-    id: String,
-    #[serde(rename = "type")]
-    tool_type: String,
-    function: Function,
-}
-
-#[derive(Deserialize, Debug)]
-struct Function {
-    name: String,
-    #[serde(rename = "arguments")]
-    args: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -73,58 +41,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::with_config(config);
 
-    let response_value = client
-        .chat()
-        .create_byot(json!({
-            "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": args.prompt
-                }
-            ],
-            "tools":[
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "Read",
-                        "description": "Read and return the contents of a file",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "file_path": {
-                                    "type": "string",
-                                    "description": "The path to the file to read",
-                                }
-                            },
-                            "required": ["file_path"]
+    // 1. Initialize the conversation history
+    let mut messages = vec![json!({
+        "role": "user",
+        "content": args.prompt
+    })];
+
+    let tools = json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "Read",
+                "description": "Read and return the contents of a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "The path to the file to read",
                         }
-                    }
+                    },
+                    "required": ["file_path"]
                 }
-            ],
-        }))
-        .await?;
-
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    // eprintln!("Logs from your program will appear here!");
-
-    let response: ChatResponse = serde_json::from_value(response_value)?;
-    if let Some(tc) = &response
-        .choices
-        .get(0)
-        .and_then(|c| c.message.tool_calls.as_ref())
-    {
-        let first_tool = tc.get(0).unwrap();
-        let function_name = &first_tool.function.name;
-
-        if function_name == "Read" {
-            let args: ReadArgs = serde_json::from_str(&first_tool.function.args)?;
-
-            let content = tokio::fs::read_to_string(&args.file_path).await.unwrap();
-            print!("{}", content);
+            }
         }
-    } else {
-        eprintln!("Unexpected response format: {:#?}", response);
+    ]);
+
+    // 2. Enter the Loop
+    loop {
+        let response: Value = client
+            .chat()
+            .create_byot(json!({
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+            }))
+            .await?;
+
+        // You can use print statements as follows for debugging, they'll be visible when running tests.
+        // eprintln!("Logs from your program will appear here!");
+
+        // Extract the assistant's message
+        let choice = &response["choices"][0];
+        let assistant_message = &choice["message"];
+
+        // 3. Record the assistant's response to history
+        messages.push(assistant_message.clone());
+
+        // 4. Check for tool calls
+        if let Some(tool_calls) = assistant_message["tool_calls"].as_array() {
+            for tc in tool_calls {
+                let call_id = tc["id"].as_str().unwrap();
+                let function_name = tc["function"]["name"].as_str().unwrap();
+                let args_str = tc["function"]["arguments"].as_str().unwrap();
+
+                if function_name == "Read" {
+                    let read_args: ReadArgs = serde_json::from_str(&args_str)?;
+
+                    // Execute the tool
+                    match tokio::fs::read_to_string(&read_args.file_path).await {
+                        Ok(content) => {
+                            // Add tool result to history
+                            messages.push(json!({
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": content
+                            }));
+                        }
+                        Err(e) => {
+                            messages.push(json!({
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "content": format!("Error reading file: {}", e)
+                            }));
+                        }
+                    };
+                }
+            }
+        // After handling all tool calls, the loop continues to send the new history back to the LLM
+        } else {
+            // 5. Repeat until complete: No tool calls means we have a final answer
+            if let Some(content) = assistant_message["content"].as_str() {
+                print!("{}", content);
+            }
+            break;
+        }
     }
 
     Ok(())
