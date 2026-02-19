@@ -17,6 +17,12 @@ struct ReadArgs {
     file_path: String,
 }
 
+#[derive(Deserialize, Debug)]
+struct WriteArgs {
+    file_path: String,
+    content: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
@@ -42,17 +48,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::with_config(config);
 
     // 1. Initialize the conversation history
-    let mut messages = vec![json!({
-        "role": "user",
-        "content": args.prompt
-    })];
+    let mut messages = vec![
+        json!({
+            "role": "system",
+            "content": "You are a minimal assistant. Only use tools when explicitly necessary. Do not explore or read files beyond what the user specifically requests."
+        }),
+        json!({
+            "role": "user",
+            "content": args.prompt
+        }),
+    ];
 
     let tools = json!([
         {
             "type": "function",
             "function": {
                 "name": "Read",
-                "description": "Read and return the contents of a file",
+                "description": "Read and return the contents of a file. Only call this when the user explicitly names a file to read.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -62,6 +74,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     },
                     "required": ["file_path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "Write",
+                "description": "Write content to a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "The path to the file to write to"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The content to write to the file"
+                        }
+                    },
+                    "required": ["file_path", "content"]
                 }
             }
         }
@@ -78,12 +111,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }))
             .await?;
 
-        // You can use print statements as follows for debugging, they'll be visible when running tests.
-        // eprintln!("Logs from your program will appear here!");
-
         // Extract the assistant's message
         let choice = &response["choices"][0];
         let assistant_message = &choice["message"];
+
+        eprintln!("finish_reason: {:?}", choice["finish_reason"]);
+        eprintln!("assistant_message: {}", assistant_message);
 
         // 3. Record the assistant's response to history
         messages.push(assistant_message.clone());
@@ -95,28 +128,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let function_name = tc["function"]["name"].as_str().unwrap();
                 let args_str = tc["function"]["arguments"].as_str().unwrap();
 
-                if function_name == "Read" {
-                    let read_args: ReadArgs = serde_json::from_str(&args_str)?;
+                let result_content = match function_name {
+                    "Read" => {
+                        let read_args: ReadArgs = serde_json::from_str(&args_str)?;
 
-                    // Execute the tool
-                    match tokio::fs::read_to_string(&read_args.file_path).await {
-                        Ok(content) => {
-                            // Add tool result to history
-                            messages.push(json!({
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "content": content
-                            }));
+                        // Execute the tool
+                        match tokio::fs::read_to_string(&read_args.file_path).await {
+                            Ok(content) => content,
+                            Err(e) => format!("Error reading file: {}", e),
                         }
-                        Err(e) => {
-                            messages.push(json!({
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "content": format!("Error reading file: {}", e)
-                            }));
+                    }
+                    "Write" => {
+                        let write_args: WriteArgs = serde_json::from_str(&args_str)?;
+
+                        // Execute the tool
+                        match tokio::fs::write(&write_args.file_path, &write_args.content).await {
+                            Ok(_) => "File written to successfully.".to_string(),
+                            Err(e) => format!("Error writing file: {}", e),
                         }
-                    };
-                }
+                    }
+                    _ => format!("Unkown tool: {}", function_name),
+                };
+
+                // Add tool result to history
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": result_content,
+                }));
             }
         // After handling all tool calls, the loop continues to send the new history back to the LLM
         } else {
